@@ -51,6 +51,12 @@ func BuildEvenQueue(namePath, numPath, timePath string, queueSize int) (<-chan D
 		nameReader := csv.NewReader(nameBuf)
 		numReader := csv.NewReader(numBuf)
 		timeReader := csv.NewReader(timeBuf)
+	nameReader.FieldsPerRecord = -1
+	numReader.FieldsPerRecord = -1
+	timeReader.FieldsPerRecord = -1
+	nameReader.LazyQuotes = true
+	numReader.LazyQuotes = true
+	timeReader.LazyQuotes = true
 
 		if _, err := nameReader.Read(); err != nil {
 			errCh <- err
@@ -67,7 +73,7 @@ func BuildEvenQueue(namePath, numPath, timePath string, queueSize int) (<-chan D
 
 		for {
 			numRow, err := numReader.Read()
-			if err == io.EOF {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
 			if err != nil {
@@ -75,19 +81,24 @@ func BuildEvenQueue(namePath, numPath, timePath string, queueSize int) (<-chan D
 				return
 			}
 			nameRow, err := nameReader.Read()
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
 			if err != nil {
 				errCh <- err
 				return
 			}
 			timeRow, err := timeReader.Read()
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
 			if err != nil {
 				errCh <- err
 				return
 			}
 
 			if len(numRow) < 2 || len(nameRow) < 2 || len(timeRow) < 2 {
-				errCh <- io.ErrUnexpectedEOF
-				return
+				continue
 			}
 
 			batchID := numRow[0]

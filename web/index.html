@@ -1,0 +1,818 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Go Bubble Tea Web TUI</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #0b0d0f;
+        color: #e7e7e7;
+        font-family: "Segoe UI", Arial, sans-serif;
+        overflow: hidden;
+      }
+
+      #app {
+        height: 100%;
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-start;
+        box-sizing: border-box;
+        position: relative;
+      }
+
+      .terminal-frame {
+        position: absolute;
+        left: 24px;
+        top: 24px;
+        width: 1000px;
+        height: 640px;
+        background: #0f1317;
+        border: 1px solid #2d333b;
+        border-radius: 10px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        z-index: 1;
+      }
+
+      .terminal-frame.active {
+        z-index: 10;
+      }
+
+      .terminal-titlebar {
+        height: 36px;
+        background: #151b21;
+        border-bottom: 1px solid #2d333b;
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 8px;
+        font-size: 13px;
+        color: #9da7b1;
+        cursor: move;
+        user-select: none;
+      }
+      .terminal-spacer {
+        flex: 1;
+      }
+
+      .status-legend {
+        display: flex;
+        gap: 10px;
+        font-weight: 600;
+        font-size: 12px;
+      }
+
+      .status-ok {
+        color: #28c840;
+      }
+
+      .status-fail {
+        color: #ff5f57;
+      }
+
+      .terminal-resizer {
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        right: 6px;
+        bottom: 6px;
+        cursor: se-resize;
+        background: #0f1317;
+        border-right: 2px solid #3b444d;
+        border-bottom: 2px solid #3b444d;
+        opacity: 0.7;
+        z-index: 5;
+      }
+
+      .terminal-frame.secondary {
+        left: 1040px;
+        top: 24px;
+        width: 620px;
+        height: 520px;
+      }
+
+      .terminal-content {
+        flex: 1;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0 18px 18px 0;
+        background: #0f1317;
+      }
+
+      .merged-shell {
+        display: flex;
+        flex: 1;
+        width: 100%;
+        height: 100%;
+      }
+
+      .merged-pane {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .merged-divider {
+        width: 2px;
+        background: #2d333b;
+      }
+
+      #api-terminal {
+        flex: 1;
+        width: 100%;
+        height: 100%;
+      }
+
+      .terminal-lights {
+        display: flex;
+        gap: 6px;
+      }
+
+      .terminal-light {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+
+      .terminal-light.red {
+        background: #ff5f57;
+      }
+
+      .terminal-light.yellow {
+        background: #ffbd2e;
+      }
+
+      .terminal-light.green {
+        background: #28c840;
+      }
+
+      #terminal {
+        flex: 1;
+        width: 100%;
+        height: 100%;
+      }
+
+      .xterm,
+      .xterm-viewport,
+      .xterm-screen {
+        height: 100%;
+      }
+
+      .xterm-viewport {
+        overflow-x: auto !important;
+        overflow-y: scroll !important;
+        scrollbar-width: none;
+      }
+
+      .xterm-viewport::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
+
+      .terminal-scrollbar-y {
+        position: absolute;
+        top: 42px;
+        right: 4px;
+        width: 8px;
+        height: calc(100% - 56px);
+        background: rgba(45, 51, 59, 0.5);
+        border-radius: 6px;
+        pointer-events: auto;
+      }
+
+      .terminal-scrollbar-y .thumb {
+        position: absolute;
+        left: 1px;
+        width: 6px;
+        background: rgba(120, 132, 146, 0.9);
+        border-radius: 6px;
+      }
+
+      .terminal-scrollbar-x {
+        position: absolute;
+        left: 12px;
+        bottom: 4px;
+        height: 8px;
+        width: calc(100% - 32px);
+        background: rgba(45, 51, 59, 0.5);
+        border-radius: 6px;
+        pointer-events: auto;
+      }
+
+      .terminal-scrollbar-x .thumb {
+        position: absolute;
+        top: 1px;
+        height: 6px;
+        background: rgba(120, 132, 146, 0.9);
+        border-radius: 6px;
+      }
+
+      .merged-pane .terminal-scrollbar-y {
+        top: 6px;
+        height: calc(100% - 12px);
+      }
+
+      .merged-pane .terminal-scrollbar-x {
+        left: 10px;
+        bottom: 6px;
+        width: calc(100% - 28px);
+      }
+
+      #reconnect {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        padding: 8px 12px;
+        background: #1e2328;
+        color: #e7e7e7;
+        border: 1px solid #2d333b;
+        border-radius: 6px;
+        cursor: pointer;
+        z-index: 30;
+      }
+
+      #merge-toggle {
+        position: fixed;
+        left: 16px;
+        top: 12px;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        background: #1e2328;
+        color: #e7e7e7;
+        border: 1px solid #2d333b;
+        border-radius: 999px;
+        cursor: pointer;
+        z-index: 20;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        overflow: hidden;
+        transition: width 160ms ease, padding 160ms ease, border-radius 160ms ease;
+      }
+
+      #merge-toggle .icon {
+        font-weight: 700;
+        font-size: 13px;
+        line-height: 1;
+        width: 18px;
+        text-align: center;
+        flex: 0 0 auto;
+      }
+
+      #merge-toggle .label {
+        opacity: 0;
+        max-width: 0;
+        white-space: nowrap;
+        transition: opacity 120ms ease, max-width 160ms ease;
+      }
+
+      #merge-toggle:hover {
+        width: 92px;
+        padding: 0 10px;
+        border-radius: 8px;
+      }
+
+      #merge-toggle:hover .label {
+        opacity: 1;
+        max-width: 80px;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="merge-toggle">
+      <span class="icon">M</span>
+      <span class="label">Merge</span>
+    </button>
+    <div id="app">
+      <div class="terminal-frame" id="terminal-frame">
+        <div class="terminal-titlebar" id="terminal-titlebar">
+          <div class="terminal-lights">
+            <span class="terminal-light red"></span>
+            <span class="terminal-light yellow"></span>
+            <span class="terminal-light green"></span>
+          </div>
+          Go Bubble Tea CLI
+          <div class="terminal-spacer"></div>
+        </div>
+        <div class="terminal-content" id="terminal-content">
+          <div id="terminal"></div>
+        </div>
+        <div class="terminal-scrollbar-y"><div class="thumb"></div></div>
+        <div class="terminal-scrollbar-x"><div class="thumb"></div></div>
+        <div class="terminal-resizer" id="terminal-resizer"></div>
+      </div>
+      <div class="terminal-frame secondary" id="api-frame">
+        <div class="terminal-titlebar" id="api-titlebar">
+          <div class="terminal-lights">
+            <span class="terminal-light red"></span>
+            <span class="terminal-light yellow"></span>
+            <span class="terminal-light green"></span>
+          </div>
+          API Request Builder
+          <div class="terminal-spacer"></div>
+        </div>
+        <div class="terminal-content" id="api-content">
+          <div id="api-terminal"></div>
+        </div>
+        <div class="terminal-scrollbar-y"><div class="thumb"></div></div>
+        <div class="terminal-scrollbar-x"><div class="thumb"></div></div>
+        <div class="terminal-resizer" id="api-resizer"></div>
+      </div>
+    </div>
+    <button id="reconnect" style="display: none">Reconnect</button>
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/xterm-addon-fit.js"></script>
+    <script>
+      const reconnectBtn = document.getElementById("reconnect");
+      const mergeToggle = document.getElementById("merge-toggle");
+      const terminalContent = document.getElementById("terminal-content");
+      const apiContent = document.getElementById("api-content");
+
+      function createWindow(config) {
+        const frame = document.getElementById(config.frameId);
+        const titlebar = document.getElementById(config.titlebarId);
+        const resizer = document.getElementById(config.resizerId);
+        const vBar = frame.querySelector(".terminal-scrollbar-y .thumb");
+        const vBarTrack = frame.querySelector(".terminal-scrollbar-y");
+        const hBar = frame.querySelector(".terminal-scrollbar-x .thumb");
+        const hBarTrack = frame.querySelector(".terminal-scrollbar-x");
+        const enableVerticalScroll =
+          config.enableVerticalScroll ?? config.enableScroll ?? false;
+        const enableHorizontalScroll =
+          config.enableHorizontalScroll ?? config.enableScroll ?? false;
+        const horizontalVisibleByDefault =
+          config.horizontalVisibleByDefault ?? enableHorizontalScroll;
+        const term = new Terminal({
+          cursorBlink: true,
+          theme: {
+            background: "#0b0d0f",
+            foreground: "#e7e7e7",
+          },
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById(config.termId));
+        fitAddon.fit();
+
+        let ws = null;
+
+        function activate() {
+          document
+            .querySelectorAll(".terminal-frame")
+            .forEach((el) => el.classList.remove("active"));
+          frame.classList.add("active");
+        }
+
+        function sendResize() {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(
+            JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows })
+          );
+        }
+
+        const viewportEl = term.element.querySelector(".xterm-viewport");
+
+        function updateScrollbars() {
+          if (enableVerticalScroll) {
+            const buffer = term.buffer.active;
+            const rows = buffer.length;
+            const viewRows = term.rows;
+            const yRatio = viewRows / Math.max(rows, 1);
+            const thumbHeight = Math.max(10, Math.round(yRatio * 100));
+            const yTop = Math.round(
+              (buffer.viewportY / Math.max(rows - viewRows, 1)) *
+                (100 - thumbHeight)
+            );
+            vBar.style.height = `${thumbHeight}%`;
+            vBar.style.top = `${Math.max(
+              0,
+              Math.min(100 - thumbHeight, yTop)
+            )}%`;
+          }
+
+          if (enableHorizontalScroll && viewportEl) {
+            const scrollWidth = viewportEl.scrollWidth;
+            const viewWidth = viewportEl.clientWidth;
+            const xRatio = viewWidth / Math.max(scrollWidth, 1);
+            const thumbWidth = Math.max(10, Math.round(xRatio * 100));
+            const maxLeft = 100 - thumbWidth;
+            const xLeft = Math.round(
+              (viewportEl.scrollLeft / Math.max(scrollWidth - viewWidth, 1)) *
+                maxLeft
+            );
+            hBar.style.width = `${thumbWidth}%`;
+            hBar.style.left = `${Math.max(0, Math.min(maxLeft, xLeft))}%`;
+          }
+        }
+
+        let dragging = false;
+        let draggingHorizontal = false;
+
+        function scrollToRatio(ratio) {
+          if (!enableVerticalScroll) return;
+          const buffer = term.buffer.active;
+          const rows = buffer.length;
+          const viewRows = term.rows;
+          const maxScroll = Math.max(rows - viewRows, 0);
+          const target = Math.round(maxScroll * ratio);
+          if (typeof term.scrollTo === "function") {
+            term.scrollTo(target);
+          } else {
+            term.scrollLines(target - buffer.viewportY);
+          }
+          updateScrollbars();
+        }
+
+        vBarTrack.addEventListener("pointerdown", (event) => {
+          if (!enableVerticalScroll) return;
+          event.preventDefault();
+          dragging = true;
+          const rect = vBarTrack.getBoundingClientRect();
+          const y = event.clientY - rect.top;
+          const ratio = Math.min(1, Math.max(0, y / rect.height));
+          scrollToRatio(ratio);
+          vBarTrack.setPointerCapture(event.pointerId);
+        });
+
+        vBarTrack.addEventListener("pointermove", (event) => {
+          if (!dragging) return;
+          const rect = vBarTrack.getBoundingClientRect();
+          const y = event.clientY - rect.top;
+          const ratio = Math.min(1, Math.max(0, y / rect.height));
+          scrollToRatio(ratio);
+        });
+
+        vBarTrack.addEventListener("pointerup", (event) => {
+          if (!enableVerticalScroll) return;
+          dragging = false;
+          vBarTrack.releasePointerCapture(event.pointerId);
+        });
+
+        function scrollToXRatio(ratio) {
+          if (!enableHorizontalScroll || !viewportEl) return;
+          const scrollWidth = viewportEl.scrollWidth;
+          const viewWidth = viewportEl.clientWidth;
+          const maxScroll = Math.max(scrollWidth - viewWidth, 0);
+          viewportEl.scrollLeft = Math.round(maxScroll * ratio);
+          updateScrollbars();
+        }
+
+        hBarTrack.addEventListener("pointerdown", (event) => {
+          if (!enableHorizontalScroll || !viewportEl) return;
+          event.preventDefault();
+          draggingHorizontal = true;
+          const rect = hBarTrack.getBoundingClientRect();
+          const x = event.clientX - rect.left;
+          const ratio = Math.min(1, Math.max(0, x / rect.width));
+          scrollToXRatio(ratio);
+          hBarTrack.setPointerCapture(event.pointerId);
+        });
+
+        hBarTrack.addEventListener("pointermove", (event) => {
+          if (!draggingHorizontal) return;
+          const rect = hBarTrack.getBoundingClientRect();
+          const x = event.clientX - rect.left;
+          const ratio = Math.min(1, Math.max(0, x / rect.width));
+          scrollToXRatio(ratio);
+        });
+
+        hBarTrack.addEventListener("pointerup", (event) => {
+          if (!enableHorizontalScroll) return;
+          draggingHorizontal = false;
+          hBarTrack.releasePointerCapture(event.pointerId);
+        });
+
+        function setReconnectVisible(visible) {
+          if (!config.allowReconnect) return;
+          reconnectBtn.style.display = visible ? "block" : "none";
+          if (visible) {
+            reconnectBtn.focus();
+          }
+        }
+
+        function reconnectVisible() {
+          return config.allowReconnect && reconnectBtn.style.display === "block";
+        }
+
+        function reconnect() {
+          if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+            return;
+          }
+          term.reset();
+          connect();
+        }
+
+        function connect() {
+          const protocol = location.protocol === "https:" ? "wss" : "ws";
+          ws = new WebSocket(`${protocol}://${location.host}${config.wsPath}`);
+          ws.binaryType = "arraybuffer";
+
+          ws.onopen = () => {
+            setReconnectVisible(false);
+            term.focus();
+            sendResize();
+          updateScrollbars();
+          };
+
+          ws.onerror = () => {
+            term.writeln("");
+            term.writeln("WebSocket error. Check server status or console logs.");
+          };
+
+          ws.onclose = () => {
+            term.writeln("");
+            if (config.allowReconnect) {
+              term.writeln("Disconnected. Click Reconnect or press r to start again.");
+            } else {
+              term.writeln("Disconnected.");
+            }
+            ws = null;
+            setReconnectVisible(true);
+          };
+
+          ws.onmessage = (event) => {
+            if (typeof event.data === "string") {
+              term.write(event.data);
+            } else {
+              term.write(new Uint8Array(event.data));
+            }
+          updateScrollbars();
+          };
+        }
+
+        connect();
+
+        term.onData((data) => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(data);
+          }
+        });
+
+        term.onScroll(() => {
+          updateScrollbars();
+        });
+
+        if (!enableVerticalScroll) {
+          vBarTrack.style.display = "none";
+        }
+        if (!enableHorizontalScroll || !horizontalVisibleByDefault) {
+          hBarTrack.style.display = "none";
+        }
+
+        window.addEventListener("resize", () => {
+          fitAddon.fit();
+          sendResize();
+          updateScrollbars();
+        });
+
+        if (viewportEl) {
+          viewportEl.addEventListener("scroll", () => {
+            updateScrollbars();
+          });
+        }
+
+        let dragState = null;
+        let resizeState = null;
+
+        titlebar.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          activate();
+          titlebar.setPointerCapture(event.pointerId);
+          dragState = {
+            startX: event.clientX,
+            startY: event.clientY,
+            startLeft: frame.offsetLeft,
+            startTop: frame.offsetTop,
+          };
+        });
+
+        titlebar.addEventListener("pointermove", (event) => {
+          if (!dragState) return;
+          const dx = event.clientX - dragState.startX;
+          const dy = event.clientY - dragState.startY;
+          const newLeft = Math.max(0, dragState.startLeft + dx);
+          const newTop = Math.max(0, dragState.startTop + dy);
+          frame.style.left = `${newLeft}px`;
+          frame.style.top = `${newTop}px`;
+        });
+
+        titlebar.addEventListener("pointerup", (event) => {
+          if (!dragState) return;
+          dragState = null;
+          titlebar.releasePointerCapture(event.pointerId);
+        });
+
+        resizer.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          activate();
+          resizer.setPointerCapture(event.pointerId);
+          resizeState = {
+            startX: event.clientX,
+            startY: event.clientY,
+            startWidth: frame.offsetWidth,
+            startHeight: frame.offsetHeight,
+          };
+        });
+
+        resizer.addEventListener("pointermove", (event) => {
+          if (!resizeState) return;
+          const dx = event.clientX - resizeState.startX;
+          const dy = event.clientY - resizeState.startY;
+          const minWidth = config.minWidth || 480;
+          const minHeight = config.minHeight || 280;
+          const newWidth = Math.max(minWidth, resizeState.startWidth + dx);
+          const newHeight = Math.max(minHeight, resizeState.startHeight + dy);
+          frame.style.width = `${newWidth}px`;
+          frame.style.height = `${newHeight}px`;
+          fitAddon.fit();
+          sendResize();
+          updateScrollbars();
+        });
+
+        resizer.addEventListener("pointerup", (event) => {
+          if (!resizeState) return;
+          resizeState = null;
+          resizer.releasePointerCapture(event.pointerId);
+        });
+
+        const setHorizontalScrollVisible = (visible) => {
+          hBarTrack.style.display = visible ? "block" : "none";
+          updateScrollbars();
+        };
+        const setVerticalScrollVisible = (visible) => {
+          vBarTrack.style.display = visible ? "block" : "none";
+          updateScrollbars();
+        };
+
+        return {
+          reconnect,
+          reconnectVisible,
+          frame,
+          fit: () => fitAddon.fit(),
+          sendResize,
+          scrollbarY: vBarTrack,
+          scrollbarX: hBarTrack,
+          setHorizontalScrollVisible,
+          setVerticalScrollVisible,
+          defaultHorizontalVisible: horizontalVisibleByDefault,
+          defaultVerticalVisible: enableVerticalScroll,
+        };
+      }
+
+      const mainWindow = createWindow({
+        frameId: "terminal-frame",
+        titlebarId: "terminal-titlebar",
+        resizerId: "terminal-resizer",
+        termId: "terminal",
+        wsPath: "/ws",
+        allowReconnect: true,
+        enableVerticalScroll: false,
+        enableHorizontalScroll: true,
+        horizontalVisibleByDefault: false,
+      });
+
+      const apiWindow = createWindow({
+        frameId: "api-frame",
+        titlebarId: "api-titlebar",
+        resizerId: "api-resizer",
+        termId: "api-terminal",
+        wsPath: "/ws/api",
+        allowReconnect: false,
+        enableVerticalScroll: true,
+        enableHorizontalScroll: true,
+        horizontalVisibleByDefault: false,
+        minWidth: 520,
+        minHeight: 320,
+      });
+
+      reconnectBtn.addEventListener("click", () => {
+        mainWindow.reconnect();
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (
+          (event.key === "r" || event.key === "R") &&
+          mainWindow.reconnectVisible()
+        ) {
+          mainWindow.reconnect();
+        }
+      });
+
+      let merged = false;
+      const savedLayout = new Map();
+      let mergedShell = null;
+
+      function applyMergedLayout() {
+        const paddingX = 24;
+        const paddingY = 24;
+        const width = Math.max(640, window.innerWidth - paddingX * 2);
+        const height = Math.max(360, window.innerHeight - paddingY * 2);
+        mainWindow.frame.style.left = `${paddingX}px`;
+        mainWindow.frame.style.top = `${paddingY}px`;
+        mainWindow.frame.style.width = `${width}px`;
+        mainWindow.frame.style.height = `${height}px`;
+      }
+
+      function saveLayout(win) {
+        savedLayout.set(win.frame, {
+          left: win.frame.style.left,
+          top: win.frame.style.top,
+          width: win.frame.style.width,
+          height: win.frame.style.height,
+        });
+      }
+
+      function restoreLayout(win) {
+        const layout = savedLayout.get(win.frame);
+        if (!layout) return;
+        win.frame.style.left = layout.left;
+        win.frame.style.top = layout.top;
+        win.frame.style.width = layout.width;
+        win.frame.style.height = layout.height;
+      }
+
+      mergeToggle.addEventListener("click", () => {
+        merged = !merged;
+        mergeToggle.querySelector(".label").textContent = merged
+          ? "Unmerge"
+          : "Merge";
+        if (merged) {
+          saveLayout(mainWindow);
+          saveLayout(apiWindow);
+          applyMergedLayout();
+
+          apiWindow.frame.style.display = "none";
+
+          mergedShell = document.createElement("div");
+          mergedShell.className = "merged-shell";
+
+          const leftPane = document.createElement("div");
+          leftPane.className = "merged-pane";
+          leftPane.appendChild(terminalContent);
+          leftPane.appendChild(mainWindow.scrollbarY);
+          leftPane.appendChild(mainWindow.scrollbarX);
+
+          const divider = document.createElement("div");
+          divider.className = "merged-divider";
+
+          const rightPane = document.createElement("div");
+          rightPane.className = "merged-pane";
+          rightPane.appendChild(apiContent);
+          rightPane.appendChild(apiWindow.scrollbarY);
+          rightPane.appendChild(apiWindow.scrollbarX);
+
+          mergedShell.appendChild(leftPane);
+          mergedShell.appendChild(divider);
+          mergedShell.appendChild(rightPane);
+          mainWindow.frame.insertBefore(
+            mergedShell,
+            mainWindow.frame.querySelector(".terminal-resizer")
+          );
+          mainWindow.setHorizontalScrollVisible(true);
+          apiWindow.setHorizontalScrollVisible(true);
+        } else {
+          if (mergedShell) {
+            const mainResizer = mainWindow.frame.querySelector(".terminal-resizer");
+            const apiResizer = apiWindow.frame.querySelector(".terminal-resizer");
+            mainWindow.frame.insertBefore(mainWindow.scrollbarY, mainResizer);
+            mainWindow.frame.insertBefore(mainWindow.scrollbarX, mainResizer);
+            mainWindow.frame.insertBefore(terminalContent, mainWindow.scrollbarY);
+            apiWindow.frame.insertBefore(apiWindow.scrollbarY, apiResizer);
+            apiWindow.frame.insertBefore(apiWindow.scrollbarX, apiResizer);
+            apiWindow.frame.insertBefore(apiContent, apiWindow.scrollbarY);
+            mergedShell.remove();
+            mergedShell = null;
+          }
+          restoreLayout(mainWindow);
+          restoreLayout(apiWindow);
+          apiWindow.frame.style.display = "flex";
+          mainWindow.setHorizontalScrollVisible(mainWindow.defaultHorizontalVisible);
+          apiWindow.setHorizontalScrollVisible(apiWindow.defaultHorizontalVisible);
+        }
+        mainWindow.fit();
+        mainWindow.sendResize();
+        apiWindow.fit();
+        apiWindow.sendResize();
+      });
+
+      window.addEventListener("resize", () => {
+        if (merged) {
+          applyMergedLayout();
+          mainWindow.fit();
+          mainWindow.sendResize();
+        }
+      });
+    </script>
+  </body>
+</html>

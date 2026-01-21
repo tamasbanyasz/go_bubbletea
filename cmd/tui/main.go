@@ -3,16 +3,22 @@ package main
 // Read README.md for more information
 
 import (
+	"bufio"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -70,12 +76,16 @@ type model struct {
 	width             int
 	height            int
 	errText           string
+	rebuildActive     bool
+	rebuildErr        string
 	watcher           *fsnotify.Watcher
 	reloadPending     bool
 	reloadTimerActive bool
 	quitStyle         lipgloss.Style
 	title             lipgloss.Style
 	selectedS         lipgloss.Style
+	successS          lipgloss.Style
+	errorS            lipgloss.Style
 }
 
 type fileEventMsg struct {
@@ -92,6 +102,11 @@ type refreshMsg struct {
 	err     error
 }
 
+type rebuildQueueMsg struct {
+	batchID string
+	err     error
+}
+
 type watchReadyMsg struct {
 	watcher *fsnotify.Watcher
 }
@@ -105,9 +120,11 @@ func main() {
 		view:      "list",
 		quitStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
 		title:     lipgloss.NewStyle().Bold(true),
-		selectedS: lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true),
+		selectedS: lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(lipgloss.Color("15")).Bold(true),
+		successS:  lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true),
+		errorS:    lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true),
 	}
-	if _, err := tea.NewProgram(m).Run(); err != nil {
+	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Println("TUI error:", err)
 		os.Exit(1)
 	}
@@ -122,7 +139,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
+		return m, tea.ClearScreen
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -137,6 +154,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "b", "esc":
 			m.view = "list"
+			return m, nil
+		case "r":
+			if m.view == "detail" && len(m.items) > 0 && m.selected < len(m.items) {
+				item := m.items[m.selected]
+				meta, ok := m.details[item.BatchID]
+				if ok && isRebuildAllowed(meta) && !m.rebuildActive {
+					m.rebuildActive = true
+					m.rebuildErr = ""
+					return m, rebuildQueueCmd(item.FilePath, meta)
+				}
+			}
 			return m, nil
 		case "up", "k":
 			if m.selected > 0 {
@@ -202,6 +230,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = 0
 		}
 		return m, nil
+	case rebuildQueueMsg:
+		if msg.err != nil {
+			m.rebuildErr = msg.err.Error()
+		} else {
+			m.rebuildErr = ""
+		}
+		m.rebuildActive = false
+		return m, nil
 	}
 	return m, nil
 }
@@ -225,7 +261,31 @@ func (m model) renderList() string {
 		}
 	}
 
-	header := m.title.Render(fmt.Sprintf("Batches: %d | Kész: %d | Hiba: %d", total, done, failed))
+	doneText := m.successS.Render(fmt.Sprintf("Kész: %d", done))
+	failedText := m.errorS.Render(fmt.Sprintf("Hiba: %d", failed))
+	doneShort := m.successS.Render(fmt.Sprintf("K:%d", done))
+	failedShort := m.errorS.Render(fmt.Sprintf("H:%d", failed))
+	headerText := fmt.Sprintf("Batches: %d | %s | %s", total, doneText, failedText)
+	if m.width > 0 {
+		switch {
+		case m.width < 12:
+			headerText = fmt.Sprintf("B:%d", total)
+		case m.width < 20:
+			headerText = fmt.Sprintf("B:%d %s", total, doneShort)
+		case m.width < 30:
+			headerText = fmt.Sprintf("B:%d %s %s", total, doneShort, failedShort)
+		case m.width < 60:
+			headerText = fmt.Sprintf("B:%d %s %s", total, doneShort, failedShort)
+		}
+	}
+	headerLine := headerText
+	if m.width > 0 {
+		headerLine = ansi.Truncate(headerLine, m.width, "")
+		if pad := m.width - lipgloss.Width(headerLine); pad > 0 {
+			headerLine += strings.Repeat(" ", pad)
+		}
+	}
+	header := m.title.Render(headerLine)
 	help := m.quitStyle.Render("↑/↓ vagy j/k: navigáció • Enter: detail • b/esc: vissza • q: kilép")
 
 	lines := []string{header, help, ""}
@@ -259,6 +319,12 @@ func (m model) renderList() string {
 		if status == "" {
 			status = "Folyamatban!"
 		}
+		switch strings.ToLower(status) {
+		case "sikeresen":
+			status = m.successS.Render(status)
+		case "hiba":
+			status = m.errorS.Render(status)
+		}
 		line := fmt.Sprintf("%s%s | %s | even=%d | %s", prefix, item.BatchID, status, item.EvenCount, item.CreatedAt)
 		if i == m.selected {
 			line = m.selectedS.Render(line)
@@ -283,6 +349,14 @@ func (m model) renderDetail() string {
 		return "A részletek nem érhetők el.\n\nNyomj b-t a visszalépéshez."
 	}
 
+	statusText := meta.Queue.Status
+	switch strings.ToLower(statusText) {
+	case "sikeresen":
+		statusText = m.successS.Render(statusText)
+	case "hiba":
+		statusText = m.errorS.Render(statusText)
+	}
+
 	lines := []string{
 		m.title.Render("Batch részletek"),
 		"",
@@ -291,10 +365,16 @@ func (m model) renderDetail() string {
 		fmt.Sprintf("Count:    %d", meta.Count),
 		fmt.Sprintf("Workers:  %d", meta.Workers),
 		"",
-		fmt.Sprintf("Queue:    %s (even=%d)", meta.Queue.Status, meta.Queue.EvenCount),
+		fmt.Sprintf("Queue:    %s (even=%d)", statusText, meta.Queue.EvenCount),
 	}
 	if meta.Queue.Error != "" {
 		lines = append(lines, fmt.Sprintf("Queue hiba: %s", meta.Queue.Error))
+	}
+	if m.rebuildActive && isRebuildAllowed(meta) {
+		lines = append(lines, "Queue újrafuttatás folyamatban...")
+	}
+	if m.rebuildErr != "" {
+		lines = append(lines, fmt.Sprintf("Újrafuttatás hiba: %s", m.rebuildErr))
 	}
 	lines = append(lines, "",
 		fmt.Sprintf("CSV name: %s", meta.CSVFiles.Name),
@@ -304,9 +384,255 @@ func (m model) renderDetail() string {
 		fmt.Sprintf("Durations (ms): gen=%d csv=%d queue=%d", meta.Durations.Generate, meta.Durations.CSV, meta.Durations.Queue),
 		fmt.Sprintf("Memory bytes: alloc=%d total=%d sys=%d", meta.Memory.Alloc, meta.Memory.TotalAlloc, meta.Memory.Sys),
 		"",
-		"Nyomj b-t a visszalépéshez.",
+		renderDetailHelp(meta),
 	)
 	return strings.Join(lines, "\n")
+}
+
+func renderDetailHelp(meta BatchMeta) string {
+	if isRebuildAllowed(meta) {
+		return "Nyomj r-t az újrafuttatáshoz, b-t a visszalépéshez."
+	}
+	return "Nyomj b-t a visszalépéshez."
+}
+
+func isRebuildAllowed(meta BatchMeta) bool {
+	status := strings.ToLower(meta.Queue.Status)
+	return status == "folyamatban" || status == "hiba"
+}
+
+type dataRecord struct {
+	BatchID string
+	Name    string
+	Num     int
+	At      time.Time
+}
+
+func rebuildQueueCmd(path string, meta BatchMeta) tea.Cmd {
+	return func() tea.Msg {
+		_ = updateBatchMetaQueueStatus(path, meta.BatchID, QueueMeta{Status: "folyamatban"})
+		start := time.Now()
+		queue, errCh := buildEvenQueue(meta.CSVFiles.Name, meta.CSVFiles.Num, meta.CSVFiles.Time, 4096)
+		evenCount := 0
+		for range queue {
+			evenCount++
+		}
+		queueErr := error(nil)
+		for err := range errCh {
+			if err != nil {
+				queueErr = err
+			}
+		}
+		queueDuration := time.Since(start)
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		metaErr := updateBatchMetaQueueResult(
+			path,
+			meta.BatchID,
+			QueueMeta{
+				EvenCount: evenCount,
+				Status:    queueStatus(queueErr),
+				Error:     queueErrorText(queueErr),
+			},
+			queueDuration.Milliseconds(),
+			MemoryMeta{
+				Alloc:      mem.Alloc,
+				TotalAlloc: mem.TotalAlloc,
+				Sys:        mem.Sys,
+			},
+		)
+		if metaErr != nil {
+			return rebuildQueueMsg{batchID: meta.BatchID, err: metaErr}
+		}
+		if queueErr != nil {
+			return rebuildQueueMsg{batchID: meta.BatchID, err: queueErr}
+		}
+		return rebuildQueueMsg{batchID: meta.BatchID, err: nil}
+	}
+}
+
+func updateBatchMetaQueueStatus(path, batchID string, queue QueueMeta) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	wrapper := map[string]BatchMeta{}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return err
+	}
+	meta, ok := wrapper[batchID]
+	if !ok {
+		meta = BatchMeta{BatchID: batchID}
+	}
+	meta.Queue = queue
+	wrapper[batchID] = meta
+	payload, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, payload, 0644)
+}
+
+func updateBatchMetaQueueResult(path, batchID string, queue QueueMeta, queueDuration int64, memory MemoryMeta) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	wrapper := map[string]BatchMeta{}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return err
+	}
+	meta, ok := wrapper[batchID]
+	if !ok {
+		meta = BatchMeta{BatchID: batchID}
+	}
+	meta.Queue = queue
+	meta.Durations.Queue = queueDuration
+	meta.Memory = memory
+	wrapper[batchID] = meta
+	payload, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, payload, 0644)
+}
+
+func buildEvenQueue(namePath, numPath, timePath string, queueSize int) (<-chan dataRecord, <-chan error) {
+	if queueSize <= 0 {
+		queueSize = 1024
+	}
+
+	out := make(chan dataRecord, queueSize)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(out)
+		defer close(errCh)
+
+		nameFile, err := os.Open(namePath)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer nameFile.Close()
+
+		numFile, err := os.Open(numPath)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer numFile.Close()
+
+		timeFile, err := os.Open(timePath)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer timeFile.Close()
+
+		nameBuf := bufio.NewReaderSize(nameFile, 1024*1024)
+		numBuf := bufio.NewReaderSize(numFile, 1024*1024)
+		timeBuf := bufio.NewReaderSize(timeFile, 1024*1024)
+
+		nameReader := csv.NewReader(nameBuf)
+		numReader := csv.NewReader(numBuf)
+		timeReader := csv.NewReader(timeBuf)
+		nameReader.FieldsPerRecord = -1
+		numReader.FieldsPerRecord = -1
+		timeReader.FieldsPerRecord = -1
+		nameReader.LazyQuotes = true
+		numReader.LazyQuotes = true
+		timeReader.LazyQuotes = true
+
+		if _, err := nameReader.Read(); err != nil {
+			errCh <- err
+			return
+		}
+		if _, err := numReader.Read(); err != nil {
+			errCh <- err
+			return
+		}
+		if _, err := timeReader.Read(); err != nil {
+			errCh <- err
+			return
+		}
+
+		for {
+			numRow, err := numReader.Read()
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			if err != nil {
+				errCh <- err
+				return
+			}
+			nameRow, err := nameReader.Read()
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			if err != nil {
+				errCh <- err
+				return
+			}
+			timeRow, err := timeReader.Read()
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			if len(numRow) < 2 || len(nameRow) < 2 || len(timeRow) < 2 {
+				continue
+			}
+
+			batchID := numRow[0]
+			if nameRow[0] != batchID || timeRow[0] != batchID {
+				errCh <- io.ErrUnexpectedEOF
+				return
+			}
+
+			num, err := strconv.Atoi(numRow[1])
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			if num%2 != 0 {
+				continue
+			}
+
+			at, err := time.Parse(time.RFC3339, timeRow[1])
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			out <- dataRecord{
+				BatchID: batchID,
+				Name:    nameRow[1],
+				Num:     num,
+				At:      at,
+			}
+		}
+	}()
+
+	return out, errCh
+}
+
+func queueStatus(err error) string {
+	if err != nil {
+		return "hiba"
+	}
+	return "sikeresen"
+}
+
+func queueErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func initWatcherCmd(dir string) tea.Cmd {
